@@ -209,6 +209,10 @@
   color: #6b7280;
 }
 
+.audio-helper.is-error {
+  color: #b91c1c;
+}
+
 @media (max-width: 600px) {
   .topbar {
     align-items: flex-start;

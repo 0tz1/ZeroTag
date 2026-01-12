@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 
 const artwork = {
@@ -12,6 +12,7 @@ const artwork = {
 };
 
 const speechText = `${artwork.title}. ${artwork.description}`;
+const ttsEndpoint = import.meta.env.VITE_TTS_ENDPOINT || '/api/tts';
 
 function App() {
   const pages = useMemo(
@@ -26,52 +27,103 @@ function App() {
   const [activePage, setActivePage] = useState('artwork');
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const audioRef = useRef(null);
+  const audioUrlRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     const supported =
       typeof window !== 'undefined' &&
-      'speechSynthesis' in window &&
-      typeof window.SpeechSynthesisUtterance !== 'undefined';
+      typeof window.fetch !== 'undefined' &&
+      typeof window.Audio !== 'undefined';
     setIsSupported(supported);
 
+    if (!supported) return;
+    const audio = new Audio();
+    audioRef.current = audio;
+    audio.onended = () => setIsSpeaking(false);
+    audio.onerror = () => {
+      setIsSpeaking(false);
+      setErrorMessage('Audio playback failed. Please try again.');
+    };
+
     return () => {
-      if (supported) {
-        window.speechSynthesis.cancel();
+      abortRef.current?.abort();
+      audio.pause();
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
       }
     };
   }, []);
 
-  const stopSpeech = () => {
-    if (!isSupported) return;
-    window.speechSynthesis.cancel();
+  const stopSpeech = useCallback(() => {
+    abortRef.current?.abort();
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
     setIsSpeaking(false);
-  };
+    setIsLoading(false);
+  }, []);
 
-  const startSpeech = () => {
+  const startSpeech = useCallback(async () => {
     if (!isSupported) return;
-    const utterance = new SpeechSynthesisUtterance(speechText);
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-    setIsSpeaking(true);
-  };
+    setErrorMessage('');
+    setIsLoading(true);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-  const handleAudioToggle = () => {
-    if (isSpeaking) {
+    try {
+      const response = await fetch(ttsEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text: speechText }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || 'Audio request failed.');
+      }
+
+      const audioBlob = await response.blob();
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+      const audioUrl = URL.createObjectURL(audioBlob);
+      audioUrlRef.current = audioUrl;
+
+      if (!audioRef.current) return;
+      audioRef.current.src = audioUrl;
+      await audioRef.current.play();
+      setIsSpeaking(true);
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+      setErrorMessage('Audio could not be generated. Check the ElevenLabs server.');
+      setIsSpeaking(false);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isSupported]);
+
+  const handleAudioToggle = useCallback(() => {
+    if (isSpeaking || isLoading) {
       stopSpeech();
       return;
     }
     startSpeech();
-  };
+  }, [isSpeaking, isLoading, startSpeech, stopSpeech]);
 
   useEffect(() => {
-    if (activePage !== 'artwork' && isSpeaking) {
+    if (activePage !== 'artwork' && (isSpeaking || isLoading)) {
       stopSpeech();
     }
-  }, [activePage, isSpeaking]);
+  }, [activePage, isSpeaking, isLoading, stopSpeech]);
 
   return (
     <div className="app-shell">
@@ -131,21 +183,34 @@ function App() {
                 onClick={handleAudioToggle}
                 disabled={!isSupported}
                 aria-pressed={isSpeaking}
+                aria-busy={isLoading}
                 aria-label={
                   isSupported
                     ? isSpeaking
                       ? 'Stop audio narration'
-                      : 'Play audio narration'
+                      : isLoading
+                        ? 'Stop audio preparation'
+                        : 'Play audio narration'
                     : 'Audio narration unavailable'
                 }
               >
-                {isSpeaking ? 'Stop Audio' : 'Play Audio'}
+                {isSpeaking || isLoading ? 'Stop Audio' : 'Play Audio'}
               </button>
-              {!isSupported && (
+              {!isSupported ? (
                 <p className="audio-helper" role="status">
                   Audio playback is not supported in this browser.
                 </p>
-              )}
+              ) : null}
+              {isSupported && isLoading ? (
+                <p className="audio-helper" role="status">
+                  Preparing your narration...
+                </p>
+              ) : null}
+              {errorMessage ? (
+                <p className="audio-helper is-error" role="status">
+                  {errorMessage}
+                </p>
+              ) : null}
             </section>
           </article>
         ) : (
